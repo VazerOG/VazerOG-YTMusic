@@ -1,4 +1,17 @@
 {
-  "version": "",
-  "patches": []
+  "version": "v1.0.0",
+  "patches": [
+    {
+      "name": "Track crossfade",
+      "description": "Adds a true dual-player crossfade between consecutive tracks. Swaps in a new ExoPlayer via YTM's own factory while the old player keeps playing, then an equal-power volume curve blends them.",
+      "use": true,
+      "dependencies": [],
+      "compatiblePackages": {
+        "com.google.android.apps.youtube.music": [
+          "8.44.54"
+        ]
+      },
+      "options": []
+    }
+  ]
 }

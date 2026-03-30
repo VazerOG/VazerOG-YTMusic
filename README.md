@@ -16,18 +16,34 @@ Custom [Morphe](https://morphe.software) patches for YouTube Music, adding true 
 |-----|---------|
 | YouTube Music | 8.44.54 |
 
+## Download
+
+Get the latest patch bundle from [GitHub Releases](https://github.com/VazerOG/VazerOG-YTMusic/releases).
+
+| File | Description |
+|------|-------------|
+| `patches-x.x.x.mpp` | Morphe patch bundle (use with Morphe app or CLI) |
+
 ## How to use
 
 ### Add to Morphe (recommended)
 
 Click here to add these patches to Morphe:
 
-**https://morphe.software/add-source?github=VazerOG/VazerOG-YTMusic**
+[**Add VazerOG patches to Morphe**](https://morphe.software/add-source?github=VazerOG/VazerOG-YTMusic)
 
 Or manually add this repository URL as a patch source in Morphe:
 
 ```
 https://github.com/VazerOG/VazerOG-YTMusic
+```
+
+### Apply with Morphe CLI
+
+```bash
+java -jar morphe-cli.jar patch \
+  --patches patches-1.0.0.mpp \
+  youtube-music-8.44.54.apk
 ```
 
 ### Build from source
@@ -41,14 +57,6 @@ cd VazerOG-YTMusic
 ```
 
 The `.mpp` patch bundle will be at `patches/build/libs/patches-*.mpp`.
-
-To apply with the Morphe CLI:
-
-```bash
-java -jar morphe-cli.jar patch \
-  --patches patches/build/libs/patches-1.0.0.mpp \
-  youtube-music.apk
-```
 
 ## License
 
