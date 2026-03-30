@@ -1,0 +1,19 @@
+VazerOG-YTMusic NOTICE
+======================
+
+This project is a set of patches compatible with Morphe for YouTube Music.
+It is NOT authored by the Morphe project.
+
+License
+-------
+
+This project is licensed under the GNU General Public License v3 (GPLv3).
+For the full license text, see the LICENSE file or:
+https://www.gnu.org/licenses/gpl-3.0.html
+
+This project uses the Morphe Patches template, which is also licensed under
+GPLv3 with Section 7 additional terms. Per those terms:
+
+- The name "Morphe" is NOT used as the name of this project.
+- References to Morphe are for descriptive compatibility purposes only
+  (e.g., "patches for use with Morphe").
