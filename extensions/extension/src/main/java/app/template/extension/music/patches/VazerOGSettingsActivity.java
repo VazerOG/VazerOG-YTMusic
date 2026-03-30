@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.util.TypedValue;
@@ -11,6 +12,8 @@ import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -60,6 +63,7 @@ public class VazerOGSettingsActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(0, dp(8), 0, dp(24));
 
+        root.addView(buildLogo());
         root.addView(buildSectionHeader("Player"));
         root.addView(buildCrossfadeToggle());
         root.addView(buildDivider());
@@ -80,6 +84,33 @@ public class VazerOGSettingsActivity extends Activity {
             return true;
         }
         return super.onOptionsItemSelected(item);
+    }
+
+    private View buildLogo() {
+        FrameLayout wrapper = new FrameLayout(this);
+        wrapper.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        ImageView logo = new ImageView(this);
+        int resId = getResources().getIdentifier("vazerog_logo", "drawable", getPackageName());
+        if (resId != 0) {
+            logo.setImageResource(resId);
+        }
+        logo.setAdjustViewBounds(true);
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.gravity = Gravity.CENTER_HORIZONTAL;
+        int maxW = dp(480);
+        int screenW = getResources().getDisplayMetrics().widthPixels;
+        if (screenW > maxW) {
+            lp.width = maxW;
+        }
+        logo.setLayoutParams(lp);
+
+        wrapper.addView(logo);
+        return wrapper;
     }
 
     private View buildSectionHeader(String text) {

@@ -6,6 +6,15 @@ val vazerOGSettingsResourcePatch = resourcePatch(
     description = "Adds VazerOG settings menu to YouTube Music settings.",
 ) {
     execute {
+        val logoStream = object {}.javaClass.getResourceAsStream("/vazerog/vazerog_logo.png")
+        if (logoStream != null) {
+            val target = get("res/drawable-xxxhdpi/vazerog_logo.png")
+            target.parentFile.mkdirs()
+            logoStream.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+
         get("res/values/strings.xml").apply {
             writeText(
                 readText().replace(
