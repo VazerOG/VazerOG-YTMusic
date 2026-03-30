@@ -1,6 +1,12 @@
-# VazerOG-YTMusic
+<p align="center">
+  <img src="assets/logo.png" alt="VazerOG YTMusic" width="320">
+</p>
 
-Custom [Morphe](https://morphe.software) patches for YouTube Music, adding true dual-player crossfade between tracks.
+<h1 align="center">VazerOG YTMusic</h1>
+
+<p align="center">
+  Custom <a href="https://morphe.software">Morphe</a> patches for YouTube Music, adding true dual-player crossfade between tracks.
+</p>
 
 ## Features
 
@@ -53,10 +59,10 @@ Prerequisites: JDK 17, Android SDK
 ```bash
 git clone https://github.com/VazerOG/VazerOG-YTMusic.git
 cd VazerOG-YTMusic
-./gradlew :patches:build
+./gradlew :patches:buildAndroid
 ```
 
-The `.mpp` patch bundle will be at `patches/build/libs/patches-*.mpp`.
+The `.mpp` patch bundle (with `classes.dex` for Android) will be at `patches/build/libs/patches-*.mpp`.
 
 ## License
 
