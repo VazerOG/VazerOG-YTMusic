@@ -58,10 +58,11 @@ public class VazerOGSettingsActivity extends Activity {
         ScrollView scrollView = new ScrollView(this);
         scrollView.setBackgroundColor(BG_COLOR);
         scrollView.setFillViewport(true);
+        scrollView.setClipToPadding(false);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(0, dp(8), 0, dp(24));
+        root.setPadding(0, 0, 0, dp(24));
 
         root.addView(buildLogo());
         root.addView(buildSectionHeader("Player"));
@@ -88,6 +89,8 @@ public class VazerOGSettingsActivity extends Activity {
 
     private View buildLogo() {
         FrameLayout wrapper = new FrameLayout(this);
+        wrapper.setClipChildren(false);
+        wrapper.setClipToPadding(false);
         wrapper.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
