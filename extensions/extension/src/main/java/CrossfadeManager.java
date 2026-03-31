@@ -1,10 +1,26 @@
+import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.RectF;
+import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.Toast;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
@@ -39,9 +55,12 @@ public class CrossfadeManager {
     private static final String PREFS_NAME = "vazerog_prefs";
     private static final String KEY_ENABLED = "crossfade_enabled";
     private static final String KEY_DURATION = "crossfade_duration_sec";
+    private static final String KEY_SESSION_CONTROL = "session_control_enabled";
 
     private static volatile int crossfadeDurationMs = 3000;
     private static volatile boolean enabled = true;
+    private static volatile boolean sessionControlEnabled = false;
+    private static volatile boolean sessionPaused = false;
     private static volatile boolean settingsLoaded = false;
 
     private static volatile boolean crossfadeInProgress = false;
@@ -54,6 +73,8 @@ public class CrossfadeManager {
     private static final int REASON_DIRECTOR_RESET = 5;
 
     private static volatile Object oldPlayer = null;
+    private static WeakReference<ImageView> playerToggleRef = new WeakReference<>(null);
+    private static final String TOGGLE_TAG = "vazerog_cf_toggle";
 
     // ------------------------------------------------------------------ //
     //  Public hook: stopVideo (manual skip-next)                          //
@@ -62,9 +83,10 @@ public class CrossfadeManager {
     public static void onBeforeStopVideo(Object atadInstance, int reason) {
         Log.d(TAG, "onBeforeStopVideo called, reason=" + reason);
         loadSettingsIfNeeded();
+        tryInjectPlayerToggle();
 
-        if (!enabled || crossfadeDurationMs <= 0) {
-            Log.d(TAG, "Crossfade disabled, skipping");
+        if (!enabled || sessionPaused || crossfadeDurationMs <= 0) {
+            Log.d(TAG, "Crossfade disabled or session-paused, skipping");
             return;
         }
 
@@ -167,8 +189,9 @@ public class CrossfadeManager {
     public static void onBeforePlayNext(Object athuInstance) {
         Log.d(TAG, "onBeforePlayNext called");
         loadSettingsIfNeeded();
+        tryInjectPlayerToggle();
 
-        if (!enabled || crossfadeDurationMs <= 0 || crossfadeInProgress) {
+        if (!enabled || sessionPaused || crossfadeDurationMs <= 0 || crossfadeInProgress) {
             return;
         }
 
@@ -415,6 +438,33 @@ public class CrossfadeManager {
         enabled = flag;
     }
 
+    public static void setSessionControlEnabled(boolean flag) {
+        sessionControlEnabled = flag;
+        updatePlayerToggleVisibility();
+    }
+
+    public static boolean isSessionControlEnabled() {
+        return sessionControlEnabled;
+    }
+
+    public static boolean isSessionPaused() {
+        return sessionPaused;
+    }
+
+    public static void toggleSessionPause() {
+        sessionPaused = !sessionPaused;
+        Log.d(TAG, "Session crossfade " + (sessionPaused ? "PAUSED" : "RESUMED"));
+        updatePlayerToggleVisibility();
+        Context ctx = getAppContext();
+        if (ctx != null) {
+            String msg = sessionPaused
+                    ? "Crossfade paused for this session"
+                    : "Crossfade resumed";
+            new Handler(Looper.getMainLooper()).post(() ->
+                    Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show());
+        }
+    }
+
     public static int getCrossfadeDuration() {
         return crossfadeDurationMs;
     }
@@ -424,14 +474,24 @@ public class CrossfadeManager {
     }
 
     /**
+     * Returns true when crossfade should actually fire:
+     * master switch is on AND not session-paused.
+     */
+    public static boolean isCrossfadeActive() {
+        loadSettingsIfNeeded();
+        return enabled && !sessionPaused;
+    }
+
+    /**
      * Called by the bytecode hook on the audio/video toggle (nba.c).
      * Returns true if the toggle should be blocked (user is trying to
-     * switch TO video while crossfade is enabled).  Switching FROM
-     * video to audio is always allowed so the user can exit video mode.
+     * switch TO video while crossfade is enabled and not session-paused).
+     * Switching FROM video to audio is always allowed.
      */
     public static boolean shouldBlockVideoToggle(Object nba) {
         loadSettingsIfNeeded();
-        if (!enabled) return false;
+        tryInjectPlayerToggle();
+        if (!enabled || sessionPaused) return false;
         try {
             Object nlwInstance = getFieldValue(nba, "a");
             Object currentState = findMethod(nlwInstance, "a").invoke(nlwInstance);
@@ -482,8 +542,160 @@ public class CrossfadeManager {
             enabled = prefs.getBoolean(KEY_ENABLED, true);
             int sec = prefs.getInt(KEY_DURATION, 3);
             crossfadeDurationMs = Math.max(1, Math.min(12, sec)) * 1000;
-
+            sessionControlEnabled = prefs.getBoolean(KEY_SESSION_CONTROL, false);
         } catch (Exception ignored) {}
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Player UI session toggle                                           //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * Attempts to find the player controls container in the current
+     * Activity's view hierarchy and inject a crossfade session toggle
+     * button.  Safe to call repeatedly — exits early if already wired
+     * or if the player UI isn't currently attached.
+     */
+    private static void tryInjectPlayerToggle() {
+        if (!sessionControlEnabled || !enabled) return;
+
+        ImageView existing = playerToggleRef.get();
+        if (existing != null && existing.isAttachedToWindow()) return;
+
+        mainHandler.post(() -> {
+            try {
+                Activity activity = getTopActivity();
+                if (activity == null) return;
+
+                int controlsId = activity.getResources().getIdentifier(
+                        "playback_controls", "id", activity.getPackageName());
+                if (controlsId == 0) return;
+
+                View controlsView = activity.findViewById(controlsId);
+                if (!(controlsView instanceof LinearLayout)) return;
+                LinearLayout controls = (LinearLayout) controlsView;
+
+                View existingTag = controls.findViewWithTag(TOGGLE_TAG);
+                if (existingTag instanceof ImageView) {
+                    wireToggleButton((ImageView) existingTag);
+                    return;
+                }
+
+                ImageView toggle = new ImageView(activity);
+                toggle.setTag(TOGGLE_TAG);
+                toggle.setImageDrawable(new CrossfadeIconDrawable(sessionPaused));
+                toggle.setScaleType(ImageView.ScaleType.CENTER);
+                toggle.setAlpha(sessionPaused ? 0.4f : 1.0f);
+                toggle.setContentDescription("Toggle crossfade");
+
+                int btnSize = dpToPx(activity, 48);
+                int padding = dpToPx(activity, 12);
+                toggle.setPadding(padding, padding, padding, padding);
+
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        btnSize, btnSize);
+                lp.gravity = Gravity.CENTER_VERTICAL;
+                toggle.setLayoutParams(lp);
+
+                controls.addView(toggle);
+                wireToggleButton(toggle);
+
+                Log.d(TAG, "Injected session toggle into playback_controls");
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to inject player toggle", e);
+            }
+        });
+    }
+
+    private static void wireToggleButton(ImageView btn) {
+        playerToggleRef = new WeakReference<>(btn);
+        btn.setOnClickListener(v -> toggleSessionPause());
+        updatePlayerToggleVisibility();
+    }
+
+    private static void updatePlayerToggleVisibility() {
+        ImageView btn = playerToggleRef.get();
+        if (btn == null) return;
+        mainHandler.post(() -> {
+            boolean visible = enabled && sessionControlEnabled;
+            btn.setVisibility(visible ? View.VISIBLE : View.GONE);
+            btn.setAlpha(sessionPaused ? 0.4f : 1.0f);
+            btn.setImageDrawable(new CrossfadeIconDrawable(sessionPaused));
+        });
+    }
+
+    private static Activity getTopActivity() {
+        try {
+            Object activityThread = Class.forName("android.app.ActivityThread")
+                    .getMethod("currentActivityThread").invoke(null);
+            if (activityThread == null) return null;
+            Field activitiesField = activityThread.getClass().getDeclaredField("mActivities");
+            activitiesField.setAccessible(true);
+            Object activities = activitiesField.get(activityThread);
+            if (activities instanceof java.util.Map) {
+                for (Object record : ((java.util.Map<?, ?>) activities).values()) {
+                    Field pausedField = record.getClass().getDeclaredField("paused");
+                    pausedField.setAccessible(true);
+                    if (!pausedField.getBoolean(record)) {
+                        Field activityField = record.getClass().getDeclaredField("activity");
+                        activityField.setAccessible(true);
+                        return (Activity) activityField.get(record);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "getTopActivity failed", e);
+        }
+        return null;
+    }
+
+    private static int dpToPx(Context ctx, int dp) {
+        return (int) TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, dp,
+                ctx.getResources().getDisplayMetrics());
+    }
+
+    /**
+     * Programmatic drawable that renders a crossfade icon: two
+     * overlapping arcs representing audio tracks blending together.
+     * When paused, a diagonal strikethrough line is drawn.
+     */
+    static class CrossfadeIconDrawable extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final boolean paused;
+
+        CrossfadeIconDrawable(boolean paused) {
+            this.paused = paused;
+            paint.setColor(Color.WHITE);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            int w = getBounds().width();
+            int h = getBounds().height();
+            float cx = w / 2f;
+            float cy = h / 2f;
+            float r = Math.min(w, h) * 0.3f;
+            paint.setStrokeWidth(r * 0.22f);
+
+            float offset = r * 0.4f;
+            RectF leftArc = new RectF(cx - r - offset, cy - r, cx + r - offset, cy + r);
+            canvas.drawArc(leftArc, -60, 120, false, paint);
+
+            RectF rightArc = new RectF(cx - r + offset, cy - r, cx + r + offset, cy + r);
+            canvas.drawArc(rightArc, 120, 120, false, paint);
+
+            if (paused) {
+                paint.setStrokeWidth(r * 0.18f);
+                canvas.drawLine(w * 0.2f, h * 0.2f, w * 0.8f, h * 0.8f, paint);
+            }
+        }
+
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter cf) { paint.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
     // ------------------------------------------------------------------ //

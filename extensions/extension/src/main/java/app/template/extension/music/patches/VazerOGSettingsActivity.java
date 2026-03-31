@@ -34,6 +34,7 @@ public class VazerOGSettingsActivity extends Activity {
     private static final String PREFS_NAME = "vazerog_prefs";
     private static final String KEY_ENABLED = "crossfade_enabled";
     private static final String KEY_DURATION = "crossfade_duration_sec";
+    private static final String KEY_SESSION_CONTROL = "session_control_enabled";
 
     private static final int BG_COLOR = 0xFF121212;
     private static final int SURFACE_COLOR = 0xFF1E1E1E;
@@ -67,6 +68,8 @@ public class VazerOGSettingsActivity extends Activity {
         root.addView(buildLogo());
         root.addView(buildSectionHeader("Player"));
         root.addView(buildCrossfadeToggle());
+        root.addView(buildDivider());
+        root.addView(buildSessionControlToggle());
         root.addView(buildDivider());
         root.addView(buildDurationSlider());
         root.addView(buildDivider());
@@ -158,6 +161,44 @@ public class VazerOGSettingsActivity extends Activity {
         toggle.setOnCheckedChangeListener((v, isChecked) -> {
             prefs.edit().putBoolean(KEY_ENABLED, isChecked).apply();
             updateProcessorField("sEnabled", isChecked);
+        });
+        row.addView(toggle);
+
+        return row;
+    }
+
+    private View buildSessionControlToggle() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(20), dp(16), dp(20), dp(16));
+
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        labels.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView title = new TextView(this);
+        title.setText("Session control");
+        title.setTextColor(TEXT_PRIMARY);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        labels.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Show a crossfade toggle in the player for quick on/off during a listening session");
+        subtitle.setTextColor(TEXT_SECONDARY);
+        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        subtitle.setPadding(0, dp(4), dp(12), 0);
+        labels.addView(subtitle);
+
+        row.addView(labels);
+
+        Switch toggle = new Switch(this);
+        boolean current = prefs.getBoolean(KEY_SESSION_CONTROL, false);
+        toggle.setChecked(current);
+        toggle.setOnCheckedChangeListener((v, isChecked) -> {
+            prefs.edit().putBoolean(KEY_SESSION_CONTROL, isChecked).apply();
+            updateProcessorField("sSessionControl", isChecked);
         });
         row.addView(toggle);
 
@@ -318,6 +359,9 @@ public class VazerOGSettingsActivity extends Activity {
             Class<?> clazz = Class.forName("CrossfadeManager");
             if ("sEnabled".equals(fieldName)) {
                 clazz.getMethod("setEnabled", boolean.class)
+                     .invoke(null, value);
+            } else if ("sSessionControl".equals(fieldName)) {
+                clazz.getMethod("setSessionControlEnabled", boolean.class)
                      .invoke(null, value);
             }
         } catch (Exception ignored) {
