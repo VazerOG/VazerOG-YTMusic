@@ -53,7 +53,36 @@ public class CrossfadeManager {
     private static final String KEY_ADVANCED_MODE = "crossfade_advanced_mode";
     private static final String KEY_DURATION_MS = "crossfade_duration_ms";
     private static final String KEY_LONG_PRESS_MS = "long_press_duration_ms";
+    private static final String KEY_CURVE = "crossfade_curve";
 
+    /**
+     * Fade curve profiles available for crossfade.
+     * Uses switch instead of abstract methods to avoid anonymous inner classes,
+     * which break EnumSetting frameworks (getClass().getEnumConstants() returns
+     * null for anonymous enum subclasses).
+     */
+    public enum FadeCurve {
+        EQUAL_POWER,
+        EASE_OUT_CUBIC,
+        EASE_OUT_QUAD,
+        SMOOTHSTEP;
+
+        public float out(float t) {
+            switch (this) {
+                case EASE_OUT_CUBIC: return 1.0f - t * t * t;
+                case EASE_OUT_QUAD:  return (1.0f - t) * (1.0f - t);
+                case SMOOTHSTEP:    return 1.0f - (3.0f * t * t - 2.0f * t * t * t);
+                default:            return (float) Math.cos(t * Math.PI / 2.0);
+            }
+        }
+
+        public float in(float t) {
+            if (this == SMOOTHSTEP) return 3.0f * t * t - 2.0f * t * t * t;
+            return (float) Math.sin(t * Math.PI / 2.0);
+        }
+    }
+
+    private static volatile FadeCurve fadeCurve = FadeCurve.EQUAL_POWER;
     private static volatile int crossfadeDurationMs = 3000;
     private static volatile boolean enabled = true;
     private static volatile boolean sessionControlEnabled = true;
@@ -69,6 +98,8 @@ public class CrossfadeManager {
     private static final int READY_TIMEOUT_MS = 10000;
     private static final int STATE_READY = 3;
     private static final int REASON_DIRECTOR_RESET = 5;
+    private static final long AUTO_ADVANCE_THRESHOLD_MS = 5000;
+    private static final long MONITOR_POLL_MS = 100;
 
     private static volatile Object oldPlayer = null;
     private static volatile Object activeDll = null;
@@ -77,6 +108,9 @@ public class CrossfadeManager {
 
     private static volatile boolean inVideoMode = false;
     private static volatile boolean skipNextCrossfade = false;
+
+    private static WeakReference<Object> lastAtadRef = new WeakReference<>(null);
+    private static Runnable autoAdvanceMonitorRunnable = null;
 
     private static int playersCreated = 0;
     private static int playersReleased = 0;
@@ -93,6 +127,7 @@ public class CrossfadeManager {
     // ------------------------------------------------------------------ //
 
     public static void onBeforeStopVideo(Object atadInstance, int reason) {
+        lastAtadRef = new WeakReference<>(atadInstance);
         loadSettingsIfNeeded();
         tryAttachLongPressHandler();
 
@@ -111,6 +146,10 @@ public class CrossfadeManager {
         }
         lastLoggedReason = -1;
         suppressedReasonCount = 0;
+
+        if (!crossfadeInProgress) {
+            startAutoAdvanceMonitor();
+        }
 
         if (skipNextCrossfade) {
             skipNextCrossfade = false;
@@ -208,6 +247,8 @@ public class CrossfadeManager {
 
             releaseOld();
             oldPlayer = currentExo;
+            crossfadeOutPlayer = currentExo;
+            crossfadeInPlayer = newExo;
             crossfadeInProgress = true;
 
             Log.d(TAG, "Old player preserved (keeps playing), polling for new track ready");
@@ -295,8 +336,11 @@ public class CrossfadeManager {
 
             releaseOld();
             oldPlayer = currentExo;
+            crossfadeOutPlayer = currentExo;
+            crossfadeInPlayer = newExo;
             crossfadeInProgress = true;
 
+            Log.d(TAG, "PlayNext: old player preserved, polling for new track ready");
             pollForNewTrackReady(newExo, currentExo);
 
         } catch (Exception e) {
@@ -367,6 +411,106 @@ public class CrossfadeManager {
     }
 
     // ------------------------------------------------------------------ //
+    //  Auto-advance: position monitor & timed crossfade                   //
+    // ------------------------------------------------------------------ //
+
+    private static void startAutoAdvanceMonitor() {
+        stopAutoAdvanceMonitor();
+        if (!enabled) return;
+
+        autoAdvanceMonitorRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!enabled || sessionPaused || crossfadeInProgress) {
+                    return;
+                }
+
+                Object atad = lastAtadRef.get();
+                if (atad == null) {
+                    mainHandler.postDelayed(this, MONITOR_POLL_MS);
+                    return;
+                }
+
+                try {
+                    Object athu = getAthuFromAtadQuiet(atad);
+                    if (athu == null) { mainHandler.postDelayed(this, MONITOR_POLL_MS); return; }
+                    Object exo = getFieldValue(athu, "h");
+                    if (exo == null) { mainHandler.postDelayed(this, MONITOR_POLL_MS); return; }
+
+                    int state = callIntMethod(exo, "r");
+                    if (state != STATE_READY) {
+                        mainHandler.postDelayed(this, MONITOR_POLL_MS);
+                        return;
+                    }
+
+                    long pos = callLongMethod(exo, "v");
+                    long dur = callLongMethod(exo, "w");
+                    if (dur <= 0) { mainHandler.postDelayed(this, MONITOR_POLL_MS); return; }
+
+                    long remaining = dur - pos;
+                    long fadeDuration = crossfadeDurationMs;
+
+                    if (remaining % 5000 < MONITOR_POLL_MS) {
+                        Log.d(TAG, "Auto-advance monitor: pos=" + pos
+                                + "ms dur=" + dur + "ms remaining=" + remaining
+                                + "ms trigger@" + fadeDuration + "ms");
+                    }
+
+                    if (dur <= fadeDuration) {
+                        mainHandler.postDelayed(this, MONITOR_POLL_MS);
+                        return;
+                    }
+
+                    if (remaining <= fadeDuration && remaining > 0) {
+                        Log.d(TAG, "Auto-advance: triggering playNextInQueue at remaining=" + remaining
+                                + "ms (fadeDuration=" + fadeDuration + "ms)");
+                        stopAutoAdvanceMonitor();
+                        try {
+                            findMethod(atad, "o").invoke(atad);
+                        } catch (Exception e) {
+                            Log.w(TAG, "playNextInQueue threw (queue may have advanced): "
+                                    + e.getMessage());
+                        }
+                        return;
+                    }
+
+                    mainHandler.postDelayed(this, MONITOR_POLL_MS);
+                } catch (Exception e) {
+                    Log.w(TAG, "Auto-advance monitor error", e);
+                    mainHandler.postDelayed(this, MONITOR_POLL_MS * 2);
+                }
+            }
+        };
+        mainHandler.postDelayed(autoAdvanceMonitorRunnable, MONITOR_POLL_MS);
+        Log.d(TAG, "Auto-advance monitor started");
+    }
+
+    private static void stopAutoAdvanceMonitor() {
+        if (autoAdvanceMonitorRunnable != null) {
+            mainHandler.removeCallbacks(autoAdvanceMonitorRunnable);
+            autoAdvanceMonitorRunnable = null;
+        }
+    }
+
+    private static Object getAthuFromAtadQuiet(Object atadInstance) {
+        try {
+            Object atxb = getFieldValue(atadInstance, "c");
+            if (atxb == null) return null;
+            for (int i = 0; i < 10; i++) {
+                Object delegate = tryGetField(atxb, "a");
+                if (delegate == null || delegate == atxb) break;
+                atxb = delegate;
+            }
+            if (tryGetField(atxb, "h") != null && tryGetField(atxb, "j") != null) {
+                return atxb;
+            }
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // ------------------------------------------------------------------ //
     //  Volume animation (equal-power curve)                               //
     // ------------------------------------------------------------------ //
 
@@ -418,8 +562,8 @@ public class CrossfadeManager {
                 long elapsed = System.currentTimeMillis() - startTime;
                 float t = Math.min(1.0f, (float) elapsed / duration);
 
-                float outVol = (float) Math.cos(t * Math.PI / 2.0);
-                float inVol  = (float) Math.sin(t * Math.PI / 2.0);
+                float outVol = fadeCurve.out(t);
+                float inVol  = fadeCurve.in(t);
 
                 try {
                     findMethod(outPlayer, "I", float.class).invoke(outPlayer, outVol);
@@ -446,6 +590,7 @@ public class CrossfadeManager {
                     } catch (Exception ignored) {}
                     releaseOld();
                     crossfadeInProgress = false;
+                    startAutoAdvanceMonitor();
                 }
             }
         });
@@ -593,6 +738,18 @@ public class CrossfadeManager {
         longPressThresholdMs = Math.max(300, Math.min(2000, ms));
     }
 
+    public static void setFadeCurve(String curveName) {
+        try {
+            fadeCurve = FadeCurve.valueOf(curveName);
+        } catch (Exception e) {
+            fadeCurve = FadeCurve.EQUAL_POWER;
+        }
+    }
+
+    public static FadeCurve getFadeCurve() {
+        return fadeCurve;
+    }
+
     public static boolean isSessionControlEnabled() {
         return sessionControlEnabled;
     }
@@ -731,6 +888,11 @@ public class CrossfadeManager {
             sessionControlEnabled = prefs.getBoolean(KEY_SESSION_CONTROL, true);
             longPressThresholdMs = Math.max(300, Math.min(2000,
                     prefs.getInt(KEY_LONG_PRESS_MS, 800)));
+            try {
+                fadeCurve = FadeCurve.valueOf(prefs.getString(KEY_CURVE, "EQUAL_POWER"));
+            } catch (Exception e) {
+                fadeCurve = FadeCurve.EQUAL_POWER;
+            }
             if (sessionControlEnabled && enabled) {
                 mainHandler.postDelayed(() -> tryAttachLongPressHandler(), 1000);
             }
@@ -977,6 +1139,10 @@ public class CrossfadeManager {
 
     private static int callIntMethod(Object obj, String name) throws Exception {
         return (int) findMethod(obj, name).invoke(obj);
+    }
+
+    private static long callLongMethod(Object obj, String name) throws Exception {
+        return (long) findMethod(obj, name).invoke(obj);
     }
 
     private static void safeRelease(Object player) {

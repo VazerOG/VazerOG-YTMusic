@@ -1,8 +1,12 @@
 package app.template.extension.music.patches;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -15,6 +19,8 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
@@ -42,8 +48,9 @@ public class VazerOGSettingsActivity extends Activity {
     private static final String KEY_ADVANCED_MODE = "crossfade_advanced_mode";
     private static final String KEY_DURATION_MS = "crossfade_duration_ms";
     private static final String KEY_LONG_PRESS_MS = "long_press_duration_ms";
+    private static final String KEY_CURVE = "crossfade_curve";
 
-    private static final String PATCH_VERSION = "1.1.0-dev.45";
+    private static final String PATCH_VERSION = "1.2.0";
 
     private static final int BG_COLOR = 0xFF121212;
     private static final int SURFACE_COLOR = 0xFF1E1E1E;
@@ -56,6 +63,7 @@ public class VazerOGSettingsActivity extends Activity {
     private View durationSliderView;
     private View durationMsView;
     private ScrollView scrollView;
+    private CurvePreviewView curvePreviewView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,6 +89,9 @@ public class VazerOGSettingsActivity extends Activity {
         root.addView(buildLogo());
         root.addView(buildSectionHeader("Player"));
         root.addView(buildCrossfadeToggle());
+        root.addView(buildDivider());
+        root.addView(buildCurveSelector());
+        root.addView(buildCurvePreview());
         root.addView(buildDivider());
         root.addView(buildSessionControlToggle());
         root.addView(buildDivider());
@@ -558,6 +569,84 @@ public class VazerOGSettingsActivity extends Activity {
 
 
 
+    private View buildCurveSelector() {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(dp(20), dp(16), dp(20), dp(8));
+
+        TextView title = new TextView(this);
+        title.setText("Fade curve");
+        title.setTextColor(TEXT_PRIMARY);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        container.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("How volume transitions between tracks");
+        subtitle.setTextColor(TEXT_SECONDARY);
+        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        subtitle.setPadding(0, dp(4), 0, dp(12));
+        container.addView(subtitle);
+
+        String currentCurve = prefs.getString(KEY_CURVE, "EQUAL_POWER");
+
+        RadioGroup group = new RadioGroup(this);
+        group.setOrientation(RadioGroup.VERTICAL);
+
+        String[][] options = {
+            {"EQUAL_POWER", "Equal power (default)"},
+            {"EASE_OUT_CUBIC", "Subtle hold"},
+            {"EASE_OUT_QUAD", "Gentle ease"},
+            {"SMOOTHSTEP", "Smooth S-curve"},
+        };
+
+        for (String[] opt : options) {
+            RadioButton btn = new RadioButton(this);
+            btn.setText(opt[1]);
+            btn.setTag(opt[0]);
+            btn.setTextColor(TEXT_PRIMARY);
+            btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            btn.setPadding(dp(8), dp(6), dp(8), dp(6));
+            btn.setChecked(opt[0].equals(currentCurve));
+            btn.setId(View.generateViewId());
+            group.addView(btn);
+        }
+
+        group.setOnCheckedChangeListener((g, checkedId) -> {
+            RadioButton selected = g.findViewById(checkedId);
+            if (selected == null) return;
+            String curveName = (String) selected.getTag();
+            prefs.edit().putString(KEY_CURVE, curveName).apply();
+            invokeProcessorMethod("setFadeCurve", String.class, curveName);
+            if (curvePreviewView != null) {
+                curvePreviewView.setCurve(curveName);
+            }
+        });
+
+        container.addView(group);
+        return container;
+    }
+
+    private View buildCurvePreview() {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(dp(20), dp(4), dp(20), dp(12));
+
+        String currentCurve = prefs.getString(KEY_CURVE, "EQUAL_POWER");
+        curvePreviewView = new CurvePreviewView(this, currentCurve);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(140));
+        curvePreviewView.setLayoutParams(lp);
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFF14141E);
+        bg.setCornerRadius(dp(10));
+        curvePreviewView.setBackground(bg);
+        curvePreviewView.setClipToOutline(true);
+
+        container.addView(curvePreviewView);
+        return container;
+    }
+
     private View buildInfoCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -574,9 +663,10 @@ public class VazerOGSettingsActivity extends Activity {
         card.setPadding(dp(16), dp(14), dp(16), dp(14));
 
         TextView info = new TextView(this);
-        info.setText("Crossfade captures the tail of the outgoing track and mixes " +
-                "it with the head of the incoming track using equal-power curves. " +
-                "Changes apply on the next track transition.");
+        info.setText("Crossfade blends the end of the outgoing track with the " +
+                "beginning of the incoming track. Choose a fade curve to control " +
+                "how volume transitions between tracks. Changes apply on the next " +
+                "track transition.");
         info.setTextColor(TEXT_SECONDARY);
         info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         info.setLineSpacing(dp(2), 1f);
@@ -630,6 +720,147 @@ public class VazerOGSettingsActivity extends Activity {
             Class<?> clazz = Class.forName("CrossfadeManager");
             clazz.getMethod(name, paramType).invoke(null, arg);
         } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Custom View that draws a live preview of the selected crossfade curve.
+     */
+    private static class CurvePreviewView extends View {
+
+        private final Paint outPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint inPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path outPath = new Path();
+        private final Path inPath = new Path();
+        private String curveName;
+
+        CurvePreviewView(Context context, String curveName) {
+            super(context);
+            this.curveName = curveName;
+
+            outPaint.setStyle(Paint.Style.STROKE);
+            outPaint.setStrokeWidth(dpf(2.5f));
+            outPaint.setColor(0xFFFF6B6B);
+            outPaint.setStrokeCap(Paint.Cap.ROUND);
+
+            inPaint.setStyle(Paint.Style.STROKE);
+            inPaint.setStrokeWidth(dpf(2.5f));
+            inPaint.setColor(0xFF4ECDC4);
+            inPaint.setStrokeCap(Paint.Cap.ROUND);
+
+            gridPaint.setStyle(Paint.Style.STROKE);
+            gridPaint.setStrokeWidth(dpf(0.5f));
+            gridPaint.setColor(0x33FFFFFF);
+
+            textPaint.setTextSize(dpf(10f));
+            textPaint.setColor(0x88FFFFFF);
+        }
+
+        void setCurve(String name) {
+            this.curveName = name;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+
+            float w = getWidth();
+            float h = getHeight();
+            float padL = dpf(32);
+            float padR = dpf(8);
+            float padT = dpf(20);
+            float padB = dpf(20);
+            float gW = w - padL - padR;
+            float gH = h - padT - padB;
+
+            for (int i = 0; i <= 4; i++) {
+                float y = padT + (gH * i / 4f);
+                canvas.drawLine(padL, y, w - padR, y, gridPaint);
+            }
+
+            textPaint.setTextAlign(Paint.Align.RIGHT);
+            for (int i = 0; i <= 4; i++) {
+                float val = 1.0f - i / 4f;
+                float y = padT + (gH * i / 4f) + dpf(3f);
+                canvas.drawText(String.format("%.0f%%", val * 100), padL - dpf(4), y, textPaint);
+            }
+
+            int steps = 100;
+            outPath.reset();
+            inPath.reset();
+
+            for (int i = 0; i <= steps; i++) {
+                float t = i / (float) steps;
+                float x = padL + t * gW;
+
+                float outVol = computeOut(t);
+                float inVol = computeIn(t);
+
+                float outY = padT + (1.0f - outVol) * gH;
+                float inY = padT + (1.0f - inVol) * gH;
+
+                if (i == 0) {
+                    outPath.moveTo(x, outY);
+                    inPath.moveTo(x, inY);
+                } else {
+                    outPath.lineTo(x, outY);
+                    inPath.lineTo(x, inY);
+                }
+            }
+
+            canvas.drawPath(outPath, outPaint);
+            canvas.drawPath(inPath, inPaint);
+
+            // Legend
+            float legendY = dpf(12);
+            float legendX = padL + dpf(4);
+
+            outPaint.setStyle(Paint.Style.FILL);
+            canvas.drawCircle(legendX, legendY, dpf(4), outPaint);
+            outPaint.setStyle(Paint.Style.STROKE);
+            textPaint.setTextAlign(Paint.Align.LEFT);
+            canvas.drawText("Outgoing", legendX + dpf(8), legendY + dpf(3.5f), textPaint);
+
+            float inLegendX = legendX + dpf(80);
+            inPaint.setStyle(Paint.Style.FILL);
+            canvas.drawCircle(inLegendX, legendY, dpf(4), inPaint);
+            inPaint.setStyle(Paint.Style.STROKE);
+            canvas.drawText("Incoming", inLegendX + dpf(8), legendY + dpf(3.5f), textPaint);
+
+            String label;
+            switch (curveName) {
+                case "EASE_OUT_CUBIC": label = "Subtle hold"; break;
+                case "EASE_OUT_QUAD": label = "Gentle ease"; break;
+                case "SMOOTHSTEP": label = "Smooth S-curve"; break;
+                default: label = "Equal power"; break;
+            }
+            textPaint.setTextAlign(Paint.Align.RIGHT);
+            canvas.drawText(label, w - padR, legendY + dpf(3.5f), textPaint);
+        }
+
+        private float computeOut(float t) {
+            switch (curveName) {
+                case "EASE_OUT_CUBIC": return 1.0f - t * t * t;
+                case "EASE_OUT_QUAD": return (1.0f - t) * (1.0f - t);
+                case "SMOOTHSTEP": return 1.0f - (3.0f * t * t - 2.0f * t * t * t);
+                default: return (float) Math.cos(t * Math.PI / 2.0);
+            }
+        }
+
+        private float computeIn(float t) {
+            if ("SMOOTHSTEP".equals(curveName)) {
+                return 3.0f * t * t - 2.0f * t * t * t;
+            }
+            return (float) Math.sin(t * Math.PI / 2.0);
+        }
+
+        private float dpf(float dp) {
+            return TypedValue.applyDimension(
+                    TypedValue.COMPLEX_UNIT_DIP, dp,
+                    getContext().getResources().getDisplayMetrics());
         }
     }
 }
