@@ -10,11 +10,14 @@
 
 ## Features
 
-- **True crossfade** -- Creates a second ExoPlayer instance via YTM's internal factory, crossfades with an equal-power volume curve, then releases the old player. No silence gap.
-- **Configurable duration** -- 1 to 12 seconds, adjustable in the VazerOG settings menu.
-- **Works on skip and auto-advance** -- Crossfade triggers on manual next/previous and on natural track endings.
-- **Video mode handling** -- Blocks switching to video mode while crossfade is active (audio-only requirement). Switching from video back to audio is always allowed.
-- **VazerOG settings UI** -- Dedicated settings page accessible from YT Music settings, with toggle, duration slider, and info card.
+- **True crossfade** — Creates a second ExoPlayer instance via YTM's internal factory, crossfades with a configurable volume curve, then releases the old player. No silence gap.
+- **Configurable duration** — 1–12 seconds or 500–30000ms in advanced mode.
+- **Fade curve selection** — Equal Power (default), Ease Out Cubic, Ease Out Quad, or Smoothstep.
+- **Works on skip and auto-advance** — Crossfade triggers on manual next/previous and on natural track endings. Each can be independently enabled/disabled.
+- **Auto-advance via `playNextInQueue`** — The monitor routes through YTM's actual queue advancement pipeline (`mo15738y` → `m15968e`), not `stopVideo` which is teardown-only.
+- **Session control** — Long-press the shuffle button to pause/resume crossfade for the current session, with configurable press duration and haptic feedback.
+- **Video mode handling** — Blocks switching to video mode while crossfade is active (audio-only requirement). Switching from video back to audio is always allowed.
+- **VazerOG settings UI** — Dedicated settings page with fade curve, duration, session control, and credit sections.
 
 ## Compatibility
 
