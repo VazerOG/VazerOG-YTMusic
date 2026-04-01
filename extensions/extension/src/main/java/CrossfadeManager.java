@@ -1,24 +1,17 @@
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.ColorFilter;
-import android.graphics.Paint;
-import android.graphics.PixelFormat;
-import android.graphics.RectF;
-import android.graphics.drawable.Drawable;
+import android.content.res.Resources;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Vibrator;
 import android.util.Log;
-import android.util.TypedValue;
-import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.FrameLayout;
-import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.Toast;
+
+import android.annotation.SuppressLint;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
@@ -48,6 +41,7 @@ import java.lang.reflect.Method;
  *   bxk.r()             → method "r" (getPlaybackState)
  *   ExoPlayer.P()       → method "P" (release)
  */
+@SuppressLint({"MissingPermission", "PrivateApi", "DiscouragedApi"})
 @SuppressWarnings("unused")
 public class CrossfadeManager {
 
@@ -56,11 +50,15 @@ public class CrossfadeManager {
     private static final String KEY_ENABLED = "crossfade_enabled";
     private static final String KEY_DURATION = "crossfade_duration_sec";
     private static final String KEY_SESSION_CONTROL = "session_control_enabled";
+    private static final String KEY_ADVANCED_MODE = "crossfade_advanced_mode";
+    private static final String KEY_DURATION_MS = "crossfade_duration_ms";
+    private static final String KEY_LONG_PRESS_MS = "long_press_duration_ms";
 
     private static volatile int crossfadeDurationMs = 3000;
     private static volatile boolean enabled = true;
-    private static volatile boolean sessionControlEnabled = false;
+    private static volatile boolean sessionControlEnabled = true;
     private static volatile boolean sessionPaused = false;
+    private static volatile boolean advancedMode = false;
     private static volatile boolean settingsLoaded = false;
 
     private static volatile boolean crossfadeInProgress = false;
@@ -73,32 +71,66 @@ public class CrossfadeManager {
     private static final int REASON_DIRECTOR_RESET = 5;
 
     private static volatile Object oldPlayer = null;
-    private static WeakReference<ImageView> playerToggleRef = new WeakReference<>(null);
-    private static final String TOGGLE_TAG = "vazerog_cf_toggle";
+    private static volatile Object activeDll = null;
+    private static volatile Object crossfadeInPlayer = null;
+    private static volatile Object crossfadeOutPlayer = null;
+
+    private static volatile boolean inVideoMode = false;
+    private static volatile boolean skipNextCrossfade = false;
+
+    private static int playersCreated = 0;
+    private static int playersReleased = 0;
+
+    private static int lastLoggedReason = -1;
+    private static int suppressedReasonCount = 0;
+    private static int lastPollState = -1;
+
+    private static final java.util.List<WeakReference<View>> longPressRefs =
+            new java.util.ArrayList<>();
 
     // ------------------------------------------------------------------ //
     //  Public hook: stopVideo (manual skip-next)                          //
     // ------------------------------------------------------------------ //
 
     public static void onBeforeStopVideo(Object atadInstance, int reason) {
-        Log.d(TAG, "onBeforeStopVideo called, reason=" + reason);
         loadSettingsIfNeeded();
-        tryInjectPlayerToggle();
+        tryAttachLongPressHandler();
 
-        if (!enabled || sessionPaused || crossfadeDurationMs <= 0) {
-            Log.d(TAG, "Crossfade disabled or session-paused, skipping");
+        if (reason != REASON_DIRECTOR_RESET) {
+            if (reason == lastLoggedReason) {
+                suppressedReasonCount++;
+            } else {
+                if (suppressedReasonCount > 0) {
+                    Log.d(TAG, "  (suppressed " + suppressedReasonCount + " duplicate reason=" + lastLoggedReason + " entries)");
+                }
+                Log.d(TAG, "stopVideo reason=" + reason + " — not a skip, ignoring");
+                lastLoggedReason = reason;
+                suppressedReasonCount = 0;
+            }
+            return;
+        }
+        lastLoggedReason = -1;
+        suppressedReasonCount = 0;
+
+        if (skipNextCrossfade) {
+            skipNextCrossfade = false;
+            Log.d(TAG, "stopVideo(5): skip — video→audio toggle (same song)");
             return;
         }
 
-        if (reason != REASON_DIRECTOR_RESET) {
-            Log.d(TAG, "Not a skip-next stop (reason=" + reason + "), skipping");
+        if (!enabled || sessionPaused || crossfadeDurationMs <= 0) {
+            Log.d(TAG, "stopVideo(5): skip [enabled=" + enabled
+                    + " paused=" + sessionPaused + " inVideo=" + inVideoMode + "]");
             return;
         }
 
         if (crossfadeInProgress) {
-            Log.d(TAG, "Crossfade already in progress, skipping");
+            Log.d(TAG, "stopVideo(5): skip — crossfade already in progress");
             return;
         }
+
+        Log.d(TAG, "stopVideo(5): STARTING crossfade [enabled=" + enabled
+                + " paused=" + sessionPaused + " inVideo=" + inVideoMode + "]");
 
         try {
             Object athu = getAthuFromAtad(atadInstance);
@@ -118,55 +150,61 @@ public class CrossfadeManager {
                     + " class=" + currentExo.getClass().getName());
 
             Object atgd = getFieldValue(athu, "j");
-            if (atgd == null) {
-                Log.e(TAG, "athu.j (atgd session) is null");
-                return;
-            }
-
+            if (atgd == null) { Log.e(TAG, "athu.j is null"); return; }
             Object atih = getFieldValue(atgd, "a");
-            if (atih == null) {
-                Log.e(TAG, "atgd.a (atih factory) is null");
-                return;
-            }
-
+            if (atih == null) { Log.e(TAG, "atgd.a is null"); return; }
             Object cqf = getFieldValue(athu, "i");
-            if (cqf == null) {
-                Log.e(TAG, "athu.i (cqf/atis) is null");
-                return;
-            }
-
+            if (cqf == null) { Log.e(TAG, "athu.i is null"); return; }
             Object crz = getFieldValue(athu, "c");
-            if (crz == null) {
-                Log.e(TAG, "athu.c (crz/cup) is null");
-                return;
-            }
-
+            if (crz == null) { Log.e(TAG, "athu.c is null"); return; }
             Object dll = getFieldValue(athu, "w");
-            if (dll == null) {
-                Log.e(TAG, "athu.w (atjx/dll) is null");
-                return;
-            }
+            if (dll == null) { Log.e(TAG, "athu.w is null"); return; }
+            activeDll = dll;
 
-            Object oldCrzPlayer = tryGetField(crz, "g");
-            Object oldDllCallback = tryGetField(dll, "h");
-            Log.d(TAG, "Clearing shared state: crz.g=" + (oldCrzPlayer != null) + " dll.h=" + (oldDllCallback != null));
+            Object oldCrzBxk = tryGetField(crz, "g");
+            Object oldDllCqb = tryGetField(dll, "h");
+            Object oldDllDlt = tryGetField(dll, "i");
+            Log.d(TAG, "Pre-factory shared state: crz.g=" + (oldCrzBxk != null)
+                    + " dll.h=" + (oldDllCqb != null) + " dll.i=" + (oldDllDlt != null));
             setFieldValue(crz, "g", null);
             setFieldValue(dll, "h", null);
 
-            Log.d(TAG, "Creating new ExoPlayer via atih.a(athu, cqf, 0)");
             Object newExo = createPlayerViaFactory(atih, athu, cqf);
             if (newExo == null) {
-                Log.e(TAG, "Factory returned null, restoring shared state");
-                setFieldValue(crz, "g", oldCrzPlayer);
-                setFieldValue(dll, "h", oldDllCallback);
+                Log.e(TAG, "Factory returned null — restoring and aborting");
+                setFieldValue(crz, "g", oldCrzBxk);
+                setFieldValue(dll, "h", oldDllCqb);
                 return;
             }
-            Log.d(TAG, "New player created: " + newExo.getClass().getName());
+
+            Object postCrzBxk = tryGetField(crz, "g");
+            Object postDllCqb = tryGetField(dll, "h");
+            Log.d(TAG, "Post-factory shared state: crz.g=" + (postCrzBxk != null)
+                    + " dll.h=" + (postDllCqb != null)
+                    + " newExo=" + System.identityHashCode(newExo));
+            if (postCrzBxk == null) {
+                Log.e(TAG, "Factory failed to set crz.g (bxk) — aborting");
+                setFieldValue(crz, "g", oldCrzBxk);
+                setFieldValue(dll, "h", oldDllCqb);
+                return;
+            }
+            if (postDllCqb == null) {
+                Log.e(TAG, "Factory failed to set dll.h (cqb) — aborting");
+                setFieldValue(crz, "g", oldCrzBxk);
+                setFieldValue(dll, "h", oldDllCqb);
+                return;
+            }
 
             findMethod(newExo, "I", float.class).invoke(newExo, 0.0f);
 
             setFieldValue(athu, "h", newExo);
             Log.d(TAG, "Swapped athu.h → new player");
+
+            Object atix = tryGetField(athu, "z");
+            if (atix != null) {
+                setFieldValue(atix, "e", newExo);
+                Log.d(TAG, "Updated atix.e → new player (video surface target)");
+            }
 
             releaseOld();
             oldPlayer = currentExo;
@@ -189,7 +227,7 @@ public class CrossfadeManager {
     public static void onBeforePlayNext(Object athuInstance) {
         Log.d(TAG, "onBeforePlayNext called");
         loadSettingsIfNeeded();
-        tryInjectPlayerToggle();
+        tryAttachLongPressHandler();
 
         if (!enabled || sessionPaused || crossfadeDurationMs <= 0 || crossfadeInProgress) {
             return;
@@ -213,16 +251,47 @@ public class CrossfadeManager {
             if (crz == null) return;
             Object dll = getFieldValue(athuInstance, "w");
             if (dll == null) return;
+            activeDll = dll;
+
+            Object oldCrzBxk = tryGetField(crz, "g");
+            Object oldDllCqb = tryGetField(dll, "h");
             setFieldValue(crz, "g", null);
             setFieldValue(dll, "h", null);
 
             Object newExo = createPlayerViaFactory(atih, athuInstance, cqf);
-            if (newExo == null) return;
+            if (newExo == null) {
+                setFieldValue(crz, "g", oldCrzBxk);
+                setFieldValue(dll, "h", oldDllCqb);
+                return;
+            }
+
+            Object postCrzBxk = tryGetField(crz, "g");
+            Object postDllCqb = tryGetField(dll, "h");
+            Log.d(TAG, "PlayNext post-factory: crz.g=" + (postCrzBxk != null)
+                    + " dll.h=" + (postDllCqb != null));
+            if (postCrzBxk == null) {
+                Log.e(TAG, "PlayNext: factory failed to set crz.g — aborting");
+                setFieldValue(crz, "g", oldCrzBxk);
+                setFieldValue(dll, "h", oldDllCqb);
+                return;
+            }
+            if (postDllCqb == null) {
+                Log.e(TAG, "PlayNext: factory failed to set dll.h — aborting");
+                setFieldValue(crz, "g", oldCrzBxk);
+                setFieldValue(dll, "h", oldDllCqb);
+                return;
+            }
 
             findMethod(newExo, "I", float.class).invoke(newExo, 0.0f);
 
             setFieldValue(athuInstance, "h", newExo);
             Log.d(TAG, "PlayNext: swapped athu.h → new player");
+
+            Object atix = tryGetField(athuInstance, "z");
+            if (atix != null) {
+                setFieldValue(atix, "e", newExo);
+                Log.d(TAG, "PlayNext: updated atix.e → new player (video surface target)");
+            }
 
             releaseOld();
             oldPlayer = currentExo;
@@ -243,10 +312,15 @@ public class CrossfadeManager {
 
     private static void pollForNewTrackReady(final Object newPlayer, final Object outPlayer) {
         final long deadline = System.currentTimeMillis() + READY_TIMEOUT_MS;
+        lastPollState = -1;
 
         mainHandler.postDelayed(new Runnable() {
             @Override
             public void run() {
+                if (!crossfadeInProgress) {
+                    return;
+                }
+
                 try {
                     int state = callIntMethod(newPlayer, "r");
                     if (state == STATE_READY) {
@@ -256,7 +330,7 @@ public class CrossfadeManager {
                     }
 
                     if (state == 4) {
-                        Log.e(TAG, "New player ended unexpectedly, aborting crossfade");
+                        Log.e(TAG, "New player ENDED unexpectedly — aborting");
                         releaseOld();
                         crossfadeInProgress = false;
                         try {
@@ -266,7 +340,10 @@ public class CrossfadeManager {
                         return;
                     }
 
-                    Log.d(TAG, "Poll: new player state=" + state);
+                    if (state != lastPollState) {
+                        Log.d(TAG, "Poll: state → " + state);
+                        lastPollState = state;
+                    }
 
                     if (System.currentTimeMillis() > deadline) {
                         Log.e(TAG, "Timeout waiting for new track");
@@ -293,6 +370,22 @@ public class CrossfadeManager {
     //  Volume animation (equal-power curve)                               //
     // ------------------------------------------------------------------ //
 
+    private static void abortCrossfadeNow() {
+        if (!crossfadeInProgress) return;
+        Log.d(TAG, "abortCrossfadeNow: snapping volumes & releasing");
+
+        Object inp = crossfadeInPlayer;
+        if (inp != null) {
+            try {
+                findMethod(inp, "I", float.class).invoke(inp, 1.0f);
+            } catch (Exception ignored) {}
+        }
+        crossfadeInPlayer = null;
+        crossfadeOutPlayer = null;
+        releaseOld();
+        crossfadeInProgress = false;
+    }
+
     private static void animateCrossfade(final Object outPlayer, final Object inPlayer) {
         if (outPlayer == null) {
             Log.w(TAG, "No old player to crossfade from");
@@ -303,6 +396,13 @@ public class CrossfadeManager {
             return;
         }
 
+        crossfadeOutPlayer = outPlayer;
+        crossfadeInPlayer = inPlayer;
+
+        try {
+            findMethod(inPlayer, "E", boolean.class).invoke(inPlayer, true);
+        } catch (Exception ignored) {}
+
         final long startTime = System.currentTimeMillis();
         final long duration = crossfadeDurationMs;
 
@@ -311,6 +411,10 @@ public class CrossfadeManager {
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
+                if (!crossfadeInProgress) {
+                    return;
+                }
+
                 long elapsed = System.currentTimeMillis() - startTime;
                 float t = Math.min(1.0f, (float) elapsed / duration);
 
@@ -333,7 +437,10 @@ public class CrossfadeManager {
                 if (t < 1.0f) {
                     mainHandler.postDelayed(this, TICK_MS);
                 } else {
-                    Log.d(TAG, "Crossfade complete");
+                    Log.d(TAG, "Crossfade complete — new track is audio-only");
+                    inVideoMode = false;
+                    crossfadeInPlayer = null;
+                    crossfadeOutPlayer = null;
                     try {
                         findMethod(inPlayer, "I", float.class).invoke(inPlayer, 1.0f);
                     } catch (Exception ignored) {}
@@ -357,7 +464,14 @@ public class CrossfadeManager {
                     athuClass, cqfClass, int.class);
             factoryMethod.setAccessible(true);
 
-            return factoryMethod.invoke(atih, athu, cqf, 0);
+            Object player = factoryMethod.invoke(atih, athu, cqf, 0);
+            if (player != null) {
+                playersCreated++;
+                Log.d(TAG, "Factory created player @" + System.identityHashCode(player)
+                        + " [created=" + playersCreated + " released=" + playersReleased
+                        + " outstanding=" + (playersCreated - playersReleased) + "]");
+            }
+            return player;
         } catch (Exception e) {
             Log.e(TAG, "createPlayerViaFactory failed", e);
             return null;
@@ -409,20 +523,49 @@ public class CrossfadeManager {
     private static void releaseOld() {
         Object p = oldPlayer;
         oldPlayer = null;
-        if (p != null) {
-            Log.d(TAG, "Releasing old player");
-            // Null out ONLY the dlt field ("O") on the old player. In the
-            // release sequence, cpp.P() accesses dlt at line 855 BEFORE
-            // reaching crz.U() at line 866. By nulling dlt, release() NPEs
-            // at line 855 (dlt.h(crz) on null dlt), which prevents the
-            // destructive crz.U() from running. crz.U() would otherwise
-            // asynchronously clear the shared cup's cau listener handler
-            // that the new player needs for UI callbacks.
-            //
-            // We keep crz (field "j") INTACT because other per-player
-            // async code (e.g. cpj.e()) still references it after release.
-            setFieldValue(p, "O", null);  // dlt (prevents reaching crz.U())
-            safeRelease(p);
+        if (p == null) return;
+
+        playersReleased++;
+        Log.d(TAG, "releaseOld: @" + System.identityHashCode(p)
+                + " [created=" + playersCreated + " released=" + playersReleased
+                + " outstanding=" + (playersCreated - playersReleased) + "]");
+
+        // 1. Save dll.h/dll.i (shared fields the new player needs).
+        //    cqb shutdown (message 7) runs synchronously inside P()
+        //    and clears these — we restore them after.
+        Object dll = activeDll;
+        Object savedH = null, savedI = null;
+        if (dll != null) {
+            savedH = tryGetField(dll, "h");
+            savedI = tryGetField(dll, "i");
+        }
+
+        // 2. Null out dlt (field "O") on the old player.
+        //    P() calls dlt.h(crz) then crz.U() — nulling dlt causes
+        //    an NPE that prevents crz.U() from tearing down the shared
+        //    cup listener bus.
+        setFieldValue(p, "O", null);
+
+        // 3. Release — do NOT call E(false) or I(0.0f) beforehand.
+        //    The crossfade animation already faded the old player to
+        //    volume 0, and P() handles internal shutdown via cqb
+        //    message 7.  Calling E(false) triggers onPaused() up the
+        //    framework chain which flips the UI play/pause button to
+        //    the wrong state.
+        safeRelease(p);
+
+        // 4. Restore dll.h/dll.i that message 7 cleared
+        if (dll != null) {
+            Object postH = tryGetField(dll, "h");
+            Object postI = tryGetField(dll, "i");
+            if (savedH != null && postH == null) {
+                setFieldValue(dll, "h", savedH);
+                Log.d(TAG, "releaseOld: restored dll.h");
+            }
+            if (savedI != null && postI == null) {
+                setFieldValue(dll, "i", savedI);
+                Log.d(TAG, "releaseOld: restored dll.i");
+            }
         }
     }
 
@@ -431,7 +574,11 @@ public class CrossfadeManager {
     // ------------------------------------------------------------------ //
 
     public static void setCrossfadeDuration(int durationMs) {
-        crossfadeDurationMs = Math.max(500, Math.min(12000, durationMs));
+        crossfadeDurationMs = Math.max(500, Math.min(30000, durationMs));
+    }
+
+    public static void setAdvancedMode(boolean flag) {
+        advancedMode = flag;
     }
 
     public static void setEnabled(boolean flag) {
@@ -440,7 +587,10 @@ public class CrossfadeManager {
 
     public static void setSessionControlEnabled(boolean flag) {
         sessionControlEnabled = flag;
-        updatePlayerToggleVisibility();
+    }
+
+    public static void setLongPressThreshold(int ms) {
+        longPressThresholdMs = Math.max(300, Math.min(2000, ms));
     }
 
     public static boolean isSessionControlEnabled() {
@@ -453,10 +603,22 @@ public class CrossfadeManager {
 
     public static void toggleSessionPause() {
         sessionPaused = !sessionPaused;
-        Log.d(TAG, "Session crossfade " + (sessionPaused ? "PAUSED" : "RESUMED"));
-        updatePlayerToggleVisibility();
+        Log.d(TAG, "Session " + (sessionPaused ? "PAUSED" : "RESUMED")
+                + " [inVideo=" + inVideoMode + " inProgress=" + crossfadeInProgress + "]");
+
+        if (sessionPaused) {
+            abortCrossfadeNow();
+        }
+
         Context ctx = getAppContext();
         if (ctx != null) {
+            try {
+                Vibrator vib = (Vibrator) ctx.getSystemService(Context.VIBRATOR_SERVICE);
+                if (vib != null && vib.hasVibrator()) {
+                    vib.vibrate(100);
+                }
+            } catch (Exception ignored) {}
+
             String msg = sessionPaused
                     ? "Crossfade paused for this session"
                     : "Crossfade resumed";
@@ -490,8 +652,7 @@ public class CrossfadeManager {
      */
     public static boolean shouldBlockVideoToggle(Object nba) {
         loadSettingsIfNeeded();
-        tryInjectPlayerToggle();
-        if (!enabled || sessionPaused) return false;
+        tryAttachLongPressHandler();
         try {
             Object nlwInstance = getFieldValue(nba, "a");
             Object currentState = findMethod(nlwInstance, "a").invoke(nlwInstance);
@@ -508,10 +669,29 @@ public class CrossfadeManager {
             fMethod.setAccessible(true);
             boolean isAudioMode = (boolean) fMethod.invoke(null, currentState);
 
+            Log.d(TAG, "videoToggle: isAudioMode=" + isAudioMode
+                    + " enabled=" + enabled + " paused=" + sessionPaused
+                    + " inVideoMode(before)=" + inVideoMode);
+
+            if (!enabled || sessionPaused) {
+                inVideoMode = isAudioMode;
+                if (!isAudioMode) {
+                    skipNextCrossfade = true;
+                }
+                Log.d(TAG, "videoToggle → ALLOW (crossfade inactive), inVideoMode="
+                        + inVideoMode + " skipNext=" + skipNextCrossfade);
+                return false;
+            }
+
             if (isAudioMode) {
+                Log.d(TAG, "videoToggle → BLOCK (audio→video while crossfade active)");
                 showVideoBlockedToast();
                 return true;
             }
+
+            inVideoMode = false;
+            skipNextCrossfade = true;
+            Log.d(TAG, "videoToggle → ALLOW (video→audio), inVideoMode=false, skipNext=true");
             return false;
         } catch (Exception e) {
             Log.w(TAG, "Could not check video toggle state", e);
@@ -540,87 +720,160 @@ public class CrossfadeManager {
             SharedPreferences prefs =
                     ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
             enabled = prefs.getBoolean(KEY_ENABLED, true);
-            int sec = prefs.getInt(KEY_DURATION, 3);
-            crossfadeDurationMs = Math.max(1, Math.min(12, sec)) * 1000;
-            sessionControlEnabled = prefs.getBoolean(KEY_SESSION_CONTROL, false);
+            advancedMode = prefs.getBoolean(KEY_ADVANCED_MODE, false);
+            if (advancedMode) {
+                int ms = prefs.getInt(KEY_DURATION_MS, 3000);
+                crossfadeDurationMs = Math.max(500, Math.min(30000, ms));
+            } else {
+                int sec = prefs.getInt(KEY_DURATION, 3);
+                crossfadeDurationMs = Math.max(1, Math.min(12, sec)) * 1000;
+            }
+            sessionControlEnabled = prefs.getBoolean(KEY_SESSION_CONTROL, true);
+            longPressThresholdMs = Math.max(300, Math.min(2000,
+                    prefs.getInt(KEY_LONG_PRESS_MS, 800)));
+            if (sessionControlEnabled && enabled) {
+                mainHandler.postDelayed(() -> tryAttachLongPressHandler(), 1000);
+            }
         } catch (Exception ignored) {}
     }
 
     // ------------------------------------------------------------------ //
-    //  Player UI session toggle                                           //
+    //  Long-press shuffle button to toggle crossfade session               //
     // ------------------------------------------------------------------ //
 
+    private static final String[] SHUFFLE_IDS = {
+        "queue_shuffle_button", "queue_shuffle",
+        "playback_queue_shuffle_button_view",
+        "overlay_queue_shuffle_button_view"
+    };
+
+    private static volatile long longPressThresholdMs = 800;
+    private static Runnable pendingLongPress;
+    private static volatile boolean longPressHandled = false;
+
     /**
-     * Attempts to find the player controls container in the current
-     * Activity's view hierarchy and inject a crossfade session toggle
-     * button.  Safe to call repeatedly — exits early if already wired
-     * or if the player UI isn't currently attached.
+     * Finds ALL shuffle button instances in the view hierarchy (main player,
+     * mini player, overlay, etc.) and attaches a touch-based long-press
+     * handler to each one.  Uses OnTouchListener with a timer rather than
+     * OnLongClickListener to avoid interference from custom touch handling.
      */
-    private static void tryInjectPlayerToggle() {
+    private static void tryAttachLongPressHandler() {
         if (!sessionControlEnabled || !enabled) return;
 
-        ImageView existing = playerToggleRef.get();
-        if (existing != null && existing.isAttachedToWindow()) return;
+        boolean allAlive = !longPressRefs.isEmpty();
+        for (WeakReference<View> ref : longPressRefs) {
+            View v = ref.get();
+            if (v == null || !v.isAttachedToWindow()) {
+                allAlive = false;
+                break;
+            }
+        }
+        if (allAlive && !longPressRefs.isEmpty()) return;
 
         mainHandler.post(() -> {
             try {
                 Activity activity = getTopActivity();
-                if (activity == null) return;
+                if (activity == null || activity.getWindow() == null) return;
 
-                int controlsId = activity.getResources().getIdentifier(
-                        "playback_controls", "id", activity.getPackageName());
-                if (controlsId == 0) return;
+                View decorView = activity.getWindow().getDecorView();
+                Resources res = activity.getResources();
+                String pkg = activity.getPackageName();
 
-                View controlsView = activity.findViewById(controlsId);
-                if (!(controlsView instanceof LinearLayout)) return;
-                LinearLayout controls = (LinearLayout) controlsView;
-
-                View existingTag = controls.findViewWithTag(TOGGLE_TAG);
-                if (existingTag instanceof ImageView) {
-                    wireToggleButton((ImageView) existingTag);
-                    return;
+                java.util.List<View> allButtons = new java.util.ArrayList<>();
+                for (String idName : SHUFFLE_IDS) {
+                    int id = res.getIdentifier(idName, "id", pkg);
+                    if (id == 0) continue;
+                    findAllViewsById(decorView, id, allButtons);
                 }
 
-                ImageView toggle = new ImageView(activity);
-                toggle.setTag(TOGGLE_TAG);
-                toggle.setImageDrawable(new CrossfadeIconDrawable(sessionPaused));
-                toggle.setScaleType(ImageView.ScaleType.CENTER);
-                toggle.setAlpha(sessionPaused ? 0.4f : 1.0f);
-                toggle.setContentDescription("Toggle crossfade");
+                Log.d(TAG, "Found " + allButtons.size()
+                        + " shuffle button instances");
 
-                int btnSize = dpToPx(activity, 48);
-                int padding = dpToPx(activity, 12);
-                toggle.setPadding(padding, padding, padding, padding);
+                longPressRefs.clear();
 
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                        btnSize, btnSize);
-                lp.gravity = Gravity.CENTER_VERTICAL;
-                toggle.setLayoutParams(lp);
+                for (View shuffleBtn : allButtons) {
+                    attachTouchLongPress(shuffleBtn);
+                    longPressRefs.add(new WeakReference<>(shuffleBtn));
 
-                controls.addView(toggle);
-                wireToggleButton(toggle);
-
-                Log.d(TAG, "Injected session toggle into playback_controls");
+                    View parent = (View) shuffleBtn.getParent();
+                    if (parent != null && parent != decorView) {
+                        attachTouchLongPress(parent);
+                        longPressRefs.add(new WeakReference<>(parent));
+                    }
+                }
             } catch (Exception e) {
-                Log.w(TAG, "Failed to inject player toggle", e);
+                Log.d(TAG, "Long-press attach skipped: " + e.getMessage());
             }
         });
     }
 
-    private static void wireToggleButton(ImageView btn) {
-        playerToggleRef = new WeakReference<>(btn);
-        btn.setOnClickListener(v -> toggleSessionPause());
-        updatePlayerToggleVisibility();
+    private static void findAllViewsById(View root, int id,
+                                          java.util.List<View> out) {
+        if (root.getId() == id) out.add(root);
+        if (root instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                findAllViewsById(vg.getChildAt(i), id, out);
+            }
+        }
     }
 
-    private static void updatePlayerToggleVisibility() {
-        ImageView btn = playerToggleRef.get();
-        if (btn == null) return;
-        mainHandler.post(() -> {
-            boolean visible = enabled && sessionControlEnabled;
-            btn.setVisibility(visible ? View.VISIBLE : View.GONE);
-            btn.setAlpha(sessionPaused ? 0.4f : 1.0f);
-            btn.setImageDrawable(new CrossfadeIconDrawable(sessionPaused));
+    private static void attachTouchLongPress(View btn) {
+        final float[] downXY = new float[2];
+        final boolean[] longPressTriggered = {false};
+
+        btn.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downXY[0] = event.getRawX();
+                    downXY[1] = event.getRawY();
+                    longPressTriggered[0] = false;
+                    longPressHandled = false;
+                    if (pendingLongPress != null) {
+                        mainHandler.removeCallbacks(pendingLongPress);
+                    }
+                    pendingLongPress = () -> {
+                        if (longPressHandled) return;
+                        longPressHandled = true;
+                        longPressTriggered[0] = true;
+                        toggleSessionPause();
+                        Log.d(TAG, "Shuffle long-press fired ("
+                                + longPressThresholdMs + "ms)");
+                    };
+                    mainHandler.postDelayed(pendingLongPress,
+                            longPressThresholdMs);
+                    return true;
+
+                case MotionEvent.ACTION_MOVE:
+                    float dx = event.getRawX() - downXY[0];
+                    float dy = event.getRawY() - downXY[1];
+                    if (Math.sqrt(dx * dx + dy * dy) > 30) {
+                        if (pendingLongPress != null) {
+                            mainHandler.removeCallbacks(pendingLongPress);
+                            pendingLongPress = null;
+                        }
+                    }
+                    return true;
+
+                case MotionEvent.ACTION_UP:
+                    if (pendingLongPress != null) {
+                        mainHandler.removeCallbacks(pendingLongPress);
+                        pendingLongPress = null;
+                    }
+                    if (longPressTriggered[0]) {
+                        return true;
+                    }
+                    v.performClick();
+                    return true;
+
+                case MotionEvent.ACTION_CANCEL:
+                    if (pendingLongPress != null) {
+                        mainHandler.removeCallbacks(pendingLongPress);
+                        pendingLongPress = null;
+                    }
+                    return true;
+            }
+            return false;
         });
     }
 
@@ -647,55 +900,6 @@ public class CrossfadeManager {
             Log.w(TAG, "getTopActivity failed", e);
         }
         return null;
-    }
-
-    private static int dpToPx(Context ctx, int dp) {
-        return (int) TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP, dp,
-                ctx.getResources().getDisplayMetrics());
-    }
-
-    /**
-     * Programmatic drawable that renders a crossfade icon: two
-     * overlapping arcs representing audio tracks blending together.
-     * When paused, a diagonal strikethrough line is drawn.
-     */
-    static class CrossfadeIconDrawable extends Drawable {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final boolean paused;
-
-        CrossfadeIconDrawable(boolean paused) {
-            this.paused = paused;
-            paint.setColor(Color.WHITE);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-        }
-
-        @Override
-        public void draw(Canvas canvas) {
-            int w = getBounds().width();
-            int h = getBounds().height();
-            float cx = w / 2f;
-            float cy = h / 2f;
-            float r = Math.min(w, h) * 0.3f;
-            paint.setStrokeWidth(r * 0.22f);
-
-            float offset = r * 0.4f;
-            RectF leftArc = new RectF(cx - r - offset, cy - r, cx + r - offset, cy + r);
-            canvas.drawArc(leftArc, -60, 120, false, paint);
-
-            RectF rightArc = new RectF(cx - r + offset, cy - r, cx + r + offset, cy + r);
-            canvas.drawArc(rightArc, 120, 120, false, paint);
-
-            if (paused) {
-                paint.setStrokeWidth(r * 0.18f);
-                canvas.drawLine(w * 0.2f, h * 0.2f, w * 0.8f, h * 0.8f, paint);
-            }
-        }
-
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
-        @Override public void setColorFilter(ColorFilter cf) { paint.setColorFilter(cf); }
-        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
     // ------------------------------------------------------------------ //

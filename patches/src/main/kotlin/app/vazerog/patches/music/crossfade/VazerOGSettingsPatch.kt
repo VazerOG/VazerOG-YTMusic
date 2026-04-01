@@ -15,33 +15,55 @@ val vazerOGSettingsResourcePatch = resourcePatch(
             }
         }
 
+        listOf(
+            "yt_outline_crossfade_vd_theme_24.xml",
+            "yt_outline_crossfade_off_vd_theme_24.xml"
+        ).forEach { name ->
+            val stream = object {}.javaClass.getResourceAsStream("/vazerog/$name") ?: return@forEach
+            val target = get("res/drawable/$name")
+            target.parentFile.mkdirs()
+            stream.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+
         get("res/values/strings.xml").apply {
-            writeText(
-                readText().replace(
-                    "</resources>",
-                    """    <string name="vazerog_settings_title">VazerOG</string>
+            val text = readText()
+            if (!text.contains("vazerog_settings_title")) {
+                writeText(
+                    text.replace(
+                        "</resources>",
+                        """    <string name="vazerog_settings_title">VazerOG</string>
     <string name="vazerog_settings_summary">Crossfade and audio enhancements</string>
 </resources>"""
+                    )
                 )
-            )
+            }
         }
 
         get("AndroidManifest.xml").apply {
-            writeText(
-                readText().replace(
-                    "</application>",
-                    """        <activity
+            val text = readText()
+            if (!text.contains("VazerOGSettingsActivity")) {
+                writeText(
+                    text.replace(
+                        "</application>",
+                        """        <activity
             android:name="app.template.extension.music.patches.VazerOGSettingsActivity"
             android:theme="@android:style/Theme.Material"
+            android:windowSoftInputMode="adjustResize"
             android:exported="false" />
     </application>"""
+                    )
                 )
-            )
+            }
         }
 
         get("res/xml/settings_headers.xml").apply {
             if (exists()) {
                 var content = readText()
+
+                if (content.contains("vazerog_settings")) return@apply
+
                 val manifestContent = get("AndroidManifest.xml").readText()
                 val packageName = Regex("""package="([^"]+)"""")
                     .find(manifestContent)?.groupValues?.get(1)
